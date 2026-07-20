@@ -1,0 +1,38 @@
+services:
+  redis:
+    image: redis:8.8.0
+    container_name: redis-dev
+    restart: unless-stopped
+    command: ["redis-server", "--requirepass", "app", "--appendonly", "yes"]
+    environment:
+      REDISCLI_AUTH: app
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  redis-insight:
+    image: redis/redisinsight:latest
+    container_name: redis-insight-dev
+    restart: unless-stopped
+    ports:
+      - "5540:5540"
+    environment:
+      RI_REDIS_HOST: redis
+      RI_REDIS_PORT: 6379
+      RI_REDIS_PASSWORD: app
+    volumes:
+      - redisinsight_data:/data
+    depends_on:
+      redis:
+        condition: service_healthy
+
+volumes:
+  redis_data:
+  redisinsight_data:
