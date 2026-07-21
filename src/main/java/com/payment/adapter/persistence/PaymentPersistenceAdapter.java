@@ -51,8 +51,8 @@ public class PaymentPersistenceAdapter implements PaymentRepository{
     public PaymentPage findNextPage(Long cursor, int limit) {
         Limit lim = Limit.of(limit);
         List<PaymentEntity> entities = (cursor == null)
-                ? jpaRepository.findByOrderByIdAsc(lim)
-                : jpaRepository.findByIdGreaterThanOrderByIdAsc(cursor, lim);
+                ? this.jpaRepository.findByOrderByIdAsc(lim)
+                : this.jpaRepository.findByIdGreaterThanOrderByIdAsc(cursor, lim);
 
         List<Payment> items = entities.stream().map(this::toDomain).toList();
         Long nextCursor = entities.isEmpty()
