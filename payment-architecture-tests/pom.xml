@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.payment</groupId>
+        <artifactId>payment-parent</artifactId>
+        <version>0.0.1-SNAPSHOT</version>
+    </parent>
+
+    <artifactId>payment-architecture-tests</artifactId>
+    <name>payment-architecture-tests</name>
+    <description>Fitness functions: enforce hexagonal layering and bounded-context isolation at build time</description>
+
+    <dependencies>
+        <!-- as classes sob análise: escopo test, nunca de produção -->
+        <dependency>
+            <groupId>com.payment</groupId>
+            <artifactId>payment-submit</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>com.payment</groupId>
+            <artifactId>payment-process</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <!-- traz API + engine transitivamente, já em escopo test -->
+        <dependency>
+            <groupId>com.tngtech.archunit</groupId>
+            <artifactId>archunit-junit5</artifactId>
+            <version>${archunit.version}</version>
+            <scope>test</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+</project>

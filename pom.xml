@@ -20,6 +20,7 @@
         <module>payment-submit</module>
         <module>payment-process</module>
         <module>payment-bootstrap</module>
+        <module>payment-architecture-tests</module>
     </modules>
 
     <properties>
@@ -30,11 +31,12 @@
         <uuidv7.version>1.1.0</uuidv7.version>
         <spring.retry.version>2.0.13</spring.retry.version>
         <springdoc.version>3.0.3</springdoc.version>
+        <archunit.version>1.4.2</archunit.version>
     </properties>
 
     <dependencyManagement>
         <dependencies>
-            <!-- módulos internos: versão declarada uma vez só -->
+            <!-- internal modules: version declared once -->
             <dependency>
                 <groupId>com.payment</groupId>
                 <artifactId>payment-submit</artifactId>
@@ -46,7 +48,7 @@
                 <version>${project.version}</version>
             </dependency>
 
-            <!-- terceiros fora do BOM do Boot -->
+            <!-- third-party libraries outside the Boot BOM -->
             <dependency>
                 <groupId>org.mapstruct</groupId>
                 <artifactId>mapstruct</artifactId>
@@ -71,7 +73,7 @@
     </dependencyManagement>
 
     <dependencies>
-        <!-- só o que TODO módulo usa -->
+        <!-- only what EVERY module uses -->
         <dependency>
             <groupId>org.projectlombok</groupId>
             <artifactId>lombok</artifactId>
@@ -81,7 +83,7 @@
 
     <build>
         <plugins>
-            <!-- herdado por todos os módulos -->
+            <!-- inherited by all modules -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-compiler-plugin</artifactId>
