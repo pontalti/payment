@@ -38,3 +38,5 @@ bin/
 ._*
 Thumbs.db
 Desktop.ini
+
+.factorypath

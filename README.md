@@ -1,15 +1,18 @@
 # Payment Service
 
-A sample payment service built with **Spring Boot 4.1** and **Java 25**, designed to demonstrate **Hexagonal Architecture (Ports & Adapters)** with **two separate and independent domains** communicating asynchronously through Kafka.
+A sample payment service built with **Spring Boot 4.1** and **Java 25**, designed to demonstrate **Hexagonal Architecture (Ports & Adapters)** with **two separate and independent bounded contexts** communicating asynchronously through Kafka.
 
 The service receives a payment request over REST, publishes it to Kafka, and a consumer processes the message and persists it in PostgreSQL. Reads are served through a Redis cache.
+
+Each bounded context is a **separate Maven module**, so the independence between them is enforced by the build itself — not merely by convention.
 
 ---
 
 ## Table of Contents
 
 - [Architecture Overview](#architecture-overview)
-- [The Two Domains](#the-two-domains)
+- [Maven Module Layout](#maven-module-layout)
+- [The Two Bounded Contexts](#the-two-bounded-contexts)
 - [Hexagonal Architecture Explained](#hexagonal-architecture-explained)
 - [Project Structure](#project-structure)
 - [What Each Layer Means](#what-each-layer-means)
@@ -29,31 +32,63 @@ The domain sits at the center of a hexagon. Everything outside — REST controll
 
 The single most important rule: **dependencies always point inward.** Adapters depend on the domain; the domain never depends on adapters. The domain does not know Kafka, PostgreSQL, or HTTP exist. This makes the business logic independent, testable in isolation, and resistant to changes in infrastructure.
 
+On top of that hexagonal core, the project is split into **three Maven modules** so that the boundary between the two bounded contexts is guaranteed at compile time: `payment-submit` and `payment-process` cannot reference each other's code, because neither declares a dependency on the other.
+
 ---
 
-## The Two Domains
+## Maven Module Layout
 
-A defining characteristic of this project is that it models **two distinct bounded contexts**, each with its own model, its own ports, and its own lifecycle. They are deliberately kept **independent** and never share domain classes.
+The project is a **multi-module Maven build**. A parent (aggregator) POM at the root declares the three modules and centralizes versions and the build plugin configuration.
 
-### 1. `submit` domain — receive and forward
+```
+payment/                         # parent / aggregator POM (packaging: pom)
+│
+├── payment-submit/              # BOUNDED CONTEXT 1 — receive & forward (stateless)
+├── payment-process/             # BOUNDED CONTEXT 2 — consume & persist (owns state)
+└── payment-bootstrap/           # composition root — main class, config, packaging
+```
+
+Responsibilities and dependencies of each module:
+
+| Module | Depends on | Contains |
+|--------|-----------|----------|
+| `payment-submit` | *(neither other module)* | The full `submit` hexagon: domain, application service, REST + Kafka producer adapters. |
+| `payment-process` | *(neither other module)* | The full `process` hexagon: domain, application services, REST query + Kafka consumer + JPA/Redis persistence adapters. |
+| `payment-bootstrap` | `payment-submit`, `payment-process` | `PaymentApplication` (the `@SpringBootApplication`), `application.yaml`, `schema.sql`, and the Spring Boot Maven plugin that produces the runnable fat jar. |
+
+**Why this matters:** the two context modules have **no dependency on each other**. The compiler will refuse any accidental import from `submit` into `process` or vice versa. What convention asked for before ("never share domain classes"), the build now enforces. If the `process` side ever needs to become a standalone microservice, it can be lifted out with its module intact — there was never a compile-time link to sever.
+
+Only `payment-bootstrap` depends on both, because its job is precisely to **compose** them into a single deployable application. It is also the only module that carries the Spring Boot plugin: a repackaged fat jar cannot be used as a library dependency, so it must live at the composition root and nowhere else.
+
+> The parent POM keeps a single `com.payment` group, and every module keeps the `com.payment` package prefix. This is what allows the `@SpringBootApplication` in `payment-bootstrap` to component-scan classes that physically live in the other two module jars.
+
+---
+
+## The Two Bounded Contexts
+
+A defining characteristic of this project is that it models **two distinct bounded contexts**, each with its own model, its own ports, its own lifecycle — and now its own module. They are deliberately kept **independent** and never share domain classes.
+
+### 1. `submit` context — receive and forward (`payment-submit`)
 
 - **Stateless.** It has no database access and holds no state.
 - Its job is to receive a payment request, validate it, generate a `PaymentId`, publish a `PaymentRequestedEvent` to Kafka, and return `202 Accepted`.
 - Its lifecycle **ends** the moment the message is handed off to Kafka. It "publishes and forgets".
+- It owns the **Kafka producer** and the **topic creation** (`KafkaProducerConfig`) — creating the topic is the responsibility of the side that writes to it.
 
-### 2. `process` domain — consume and persist
+### 2. `process` context — consume and persist (`payment-process`)
 
 - **Owns the state.** It is the only side that touches PostgreSQL.
 - It consumes the Kafka message, reconstructs the payment in its own model, applies processing logic (e.g. status transitions), and persists it.
-- Reads (by UUID, and paginated listing) are also served by this domain, accelerated by a Redis cache.
+- Reads (by UUID, and paginated listing) are also served by this context, accelerated by a Redis cache.
+- It owns the **Kafka consumer**, including retry/DLT handling, and all **persistence** (JPA + Redis).
 
-### Why the domains do not share code
+### Why the contexts do not share code
 
 Because these are genuinely separate bounded contexts, each one has its **own copy** of the value objects (`PaymentId`, `PaymentInstrument`, `PaymentMethod`, `FundingType`). This duplication is **intentional**, not an oversight.
 
-The only bridge between the two domains is the **Kafka message** — a JSON contract made of primitive fields (strings, numbers). Neither domain imports classes from the other. The `submit` side translates its domain into the event; the `process` side translates the event into its own domain.
+The only bridge between the two contexts is the **Kafka message** — a JSON contract made of primitive fields (strings, numbers). Neither context imports classes from the other; with the modular split, neither *can*. The `submit` side translates its domain into the event; the `process` side translates the event into its own domain.
 
-This gives a concrete benefit: if the `process` side ever needs to become a separate microservice/deployment, it can be extracted without touching `submit`, because there was never a compile-time dependency between them. The price paid — duplicated value objects — buys that independence.
+This buys a concrete benefit: if the `process` side ever needs to become a separate microservice/deployment, it can be extracted without touching `submit`, because there was never a compile-time dependency between them. The price paid — duplicated value objects — buys that independence, and the module boundary makes the price non-negotiable.
 
 ---
 
@@ -65,8 +100,8 @@ The hexagon has two kinds of ports, distinguished by **who calls whom**:
 
 Interfaces that represent **entry points into the domain**. Something on the outside (a REST controller, a Kafka consumer) calls the domain through them.
 
-- `SubmitPaymentUseCase` — the entry point of the `submit` domain
-- `ProcessPaymentUseCase` — the entry point of the `process` domain (for processing a message)
+- `SubmitPaymentUseCase` — the entry point of the `submit` context
+- `ProcessPaymentUseCase` — the entry point of the `process` context (for processing a message)
 - `GetPaymentUseCase` — the entry point for reads
 
 ### Driven ports (outbound) — `port.out`
@@ -80,13 +115,13 @@ Interfaces that represent **things the domain needs from the outside**, named by
 
 Concrete classes that either **call** a driving port or **implement** a driven port:
 
-| Adapter | Type | Role |
-|---------|------|------|
-| `PaymentController` | Driving | Receives HTTP POST, calls `SubmitPaymentUseCase` |
-| `PaymentQueryController` | Driving | Receives HTTP GET, calls `GetPaymentUseCase` |
-| `PaymentKafkaConsumer` | Driving | Receives Kafka message, calls `ProcessPaymentUseCase` |
-| `PaymentKafkaProducer` | Driven | Implements `PaymentEventPublisher` (publishes to Kafka) |
-| `PaymentPersistenceAdapter` | Driven | Implements `PaymentRepository` (PostgreSQL + Redis cache) |
+| Adapter | Module | Type | Role |
+|---------|--------|------|------|
+| `PaymentController` | submit | Driving | Receives HTTP POST, calls `SubmitPaymentUseCase` |
+| `PaymentQueryController` | process | Driving | Receives HTTP GET, calls `GetPaymentUseCase` |
+| `PaymentKafkaConsumer` | process | Driving | Receives Kafka message, calls `ProcessPaymentUseCase` |
+| `PaymentKafkaProducer` | submit | Driven | Implements `PaymentEventPublisher` (publishes to Kafka) |
+| `PaymentPersistenceAdapter` | process | Driven | Implements `PaymentRepository` (PostgreSQL + Redis cache) |
 
 Note the symmetry: **driving adapters call ports; driven adapters implement ports.** A controller and a Kafka consumer are structurally the same kind of thing — both are entry points that invoke a use case. Neither implements an interface.
 
@@ -94,96 +129,104 @@ Note the symmetry: **driving adapters call ports; driven adapters implement port
 
 ## Project Structure
 
-At the **root of the project** there is also a `docker/` folder containing a `docker-compose` file that provisions all the required infrastructure — **Redis, Kafka, and PostgreSQL** — so the whole environment can be started with a single command (see [Running the Application](#running-the-application)).
+Each context module follows the same internal hexagonal layout (`domain` → `application` → `adapter`). At the **root of the project** there is a `docker/` folder containing a `docker-compose` file that provisions all the required infrastructure — **Redis, Kafka, and PostgreSQL** — so the whole environment can be started with a single command (see [Running the Application](#running-the-application)).
 
 ```
-com.payment
+payment/                                        # parent / aggregator POM
 │
-├── PaymentApplication.java                 # Spring Boot entry point
+├── payment-submit/                             # ── MODULE: BOUNDED CONTEXT 1 (stateless) ──
+│   └── com.payment.submit
+│       ├── domain                              #   value objects (owned by submit)
+│       │   ├── PaymentId.java
+│       │   ├── PaymentInstrument.java
+│       │   ├── PaymentMethod.java
+│       │   ├── FundingType.java
+│       │   └── SubmitPaymentCommand.java       #   input carried into the use case
+│       ├── application
+│       │   └── SubmitPaymentService.java       #   implements SubmitPaymentUseCase
+│       ├── port
+│       │   ├── in
+│       │   │   └── SubmitPaymentUseCase.java            # driving port (entry point)
+│       │   └── out
+│       │       ├── PaymentEventPublisher.java          # driven port (publish to Kafka)
+│       │       └── PaymentRequestedEvent.java          # the neutral cross-context message
+│       └── adapter
+│           ├── rest                            #   DRIVING adapter: HTTP
+│           │   ├── PaymentController.java       #   POST /api/v1/payments → SubmitPaymentUseCase
+│           │   ├── dto
+│           │   │   ├── PaymentRequest.java
+│           │   │   ├── PaymentAcceptedResponse.java
+│           │   │   └── PaymentStatus.java
+│           │   └── validator
+│           │       ├── ValidPaymentInstrument.java
+│           │       └── PaymentInstrumentValidator.java
+│           └── kafka                           #   DRIVEN adapter: Kafka producer
+│               ├── PaymentKafkaProducer.java   #   implements PaymentEventPublisher
+│               ├── PaymentEventPublishingException.java
+│               └── config
+│                   └── KafkaProducerConfig.java #   topic creation (owned by the producer side)
 │
-├── domain                                  # ── THE HEXAGON CORE (no framework/infra dependencies) ──
-│   │
-│   ├── submit                              # BOUNDED CONTEXT 1: receive & forward (stateless)
-│   │   ├── SubmitPaymentCommand.java       #   input carried into the use case
-│   │   ├── model                           #   value objects (owned by submit)
-│   │   │   ├── PaymentId.java
-│   │   │   ├── PaymentInstrument.java
-│   │   │   ├── PaymentMethod.java
-│   │   │   └── FundingType.java
-│   │   └── port
-│   │       ├── in
-│   │       │   └── SubmitPaymentUseCase.java        # driving port (entry point)
-│   │       └── out
-│   │           ├── PaymentEventPublisher.java       # driven port (publish to Kafka)
-│   │           └── PaymentRequestedEvent.java       # the neutral cross-context message
-│   │
-│   ├── process                             # BOUNDED CONTEXT 2: consume & persist (owns state)
-│   │   ├── ProcessPaymentCommand.java
-│   │   ├── model                           #   value objects (owned by process — duplicated on purpose)
-│   │   │   ├── Payment.java                #   the aggregate
-│   │   │   ├── PaymentId.java
-│   │   │   ├── PaymentInstrument.java
-│   │   │   ├── PaymentMethod.java
-│   │   │   ├── FundingType.java
-│   │   │   ├── PaymentStatus.java          #   PROCESSING / COMPLETED / FAILED
-│   │   │   ├── PaymentPage.java            #   keyset pagination result
-│   │   │   └── PaymentNotFoundException.java
-│   │   └── port
-│   │       ├── in
-│   │       │   ├── ProcessPaymentUseCase.java       # driving port (consume)
-│   │       │   └── GetPaymentUseCase.java           # driving port (read)
-│   │       └── out
-│   │           └── PaymentRepository.java           # driven port (persist / read)
-│   │
-│   └── application                         # ── APPLICATION SERVICES (use case implementations) ──
-│       ├── submit
-│       │   └── SubmitPaymentService.java   #   implements SubmitPaymentUseCase
-│       └── process
-│           ├── ProcessPaymentService.java  #   implements ProcessPaymentUseCase
-│           └── GetPaymentService.java      #   implements GetPaymentUseCase
+├── payment-process/                            # ── MODULE: BOUNDED CONTEXT 2 (owns state) ──
+│   └── com.payment.process
+│       ├── domain                              #   value objects (duplicated on purpose)
+│       │   ├── Payment.java                    #   the aggregate
+│       │   ├── PaymentId.java
+│       │   ├── PaymentInstrument.java
+│       │   ├── PaymentMethod.java
+│       │   ├── FundingType.java
+│       │   ├── PaymentStatus.java              #   PROCESSING / COMPLETED / FAILED
+│       │   ├── PaymentPage.java                #   keyset pagination result
+│       │   ├── PaymentNotFoundException.java
+│       │   └── ProcessPaymentCommand.java
+│       ├── application
+│       │   ├── ProcessPaymentService.java      #   implements ProcessPaymentUseCase
+│       │   └── GetPaymentService.java          #   implements GetPaymentUseCase
+│       ├── port
+│       │   ├── in
+│       │   │   ├── ProcessPaymentUseCase.java          # driving port (consume)
+│       │   │   └── GetPaymentUseCase.java              # driving port (read)
+│       │   └── out
+│       │       └── PaymentRepository.java              # driven port (persist / read)
+│       └── adapter
+│           ├── rest                            #   DRIVING adapter: HTTP reads
+│           │   ├── PaymentQueryController.java  #   GET /api/v1/payments → GetPaymentUseCase
+│           │   ├── PaymentExceptionHandler.java #   domain errors → HTTP status codes
+│           │   └── dto
+│           │       ├── PaymentResponse.java
+│           │       └── PaymentPageResponse.java
+│           ├── kafka                           #   DRIVING adapter: Kafka consumer
+│           │   ├── PaymentKafkaConsumer.java    #   @RetryableTopic + @DltHandler → ProcessPaymentUseCase
+│           │   └── dto
+│           │       └── PaymentMessage.java      #   the JSON envelope read from the topic
+│           └── persistence                     #   DRIVEN adapter: PostgreSQL + Redis
+│               ├── PaymentPersistenceAdapter.java  # implements PaymentRepository (+ cache annotations)
+│               ├── PaymentJpaRepository.java       # Spring Data JPA repository
+│               ├── model
+│               │   └── PaymentEntity.java          # JPA @Entity (never leaves this package)
+│               └── config
+│                   ├── DataSourceConfig.java
+│                   ├── RedisCacheConfig.java       # Redis cache manager (Jackson 3 typing)
+│                   └── PaymentIdMixin.java          # keeps the domain free of Jackson annotations
 │
-└── adapter                                 # ── ADAPTERS (the infrastructure edge) ──
-    │
-    ├── rest                                # DRIVING adapter: HTTP
-    │   ├── PaymentController.java          #   POST /api/v1/payments  → SubmitPaymentUseCase
-    │   ├── PaymentQueryController.java     #   GET  /api/v1/payments  → GetPaymentUseCase
-    │   ├── PaymentExceptionHandler.java    #   translates domain errors → HTTP status codes
-    │   ├── dto                             #   request/response objects (never leak the domain)
-    │   │   ├── PaymentRequest.java
-    │   │   ├── PaymentResponse.java
-    │   │   ├── PaymentAcceptedResponse.java
-    │   │   └── PaymentPageResponse.java
-    │   └── validator                       #   cross-field bean validation
-    │       ├── ValidPaymentInstrument.java
-    │       └── PaymentInstrumentValidator.java
-    │
-    ├── message                             # Kafka adapters (both directions)
-    │   ├── PaymentKafkaProducer.java       #   DRIVEN: implements PaymentEventPublisher
-    │   ├── PaymentKafkaConsumer.java        #   DRIVING: calls ProcessPaymentUseCase
-    │   ├── KafkaProducerConfig.java
-    │   ├── PaymentEventPublishingException.java
-    │   └── dto
-    │       └── PaymentMessage.java         #   the JSON envelope read from the topic
-    │
-    └── persistence                         # DRIVEN adapter: PostgreSQL + Redis
-        ├── PaymentPersistenceAdapter.java  #   implements PaymentRepository (+ cache annotations)
-        ├── PaymentJpaRepository.java       #   Spring Data JPA repository
-        ├── model
-        │   └── PaymentEntity.java          #   JPA @Entity (never leaves this package)
-        └── config
-            ├── DataSourceConfig.java
-            └── RedisCacheConfig.java       #   Redis cache manager (Jackson 3 typing)
+└── payment-bootstrap/                          # ── MODULE: composition root ──
+    ├── com.payment
+    │   └── PaymentApplication.java             #   @SpringBootApplication entry point
+    └── src/main/resources
+        ├── application.yaml                    #   all runtime configuration lives here
+        └── schema.sql
 ```
 
 ---
 
 ## What Each Layer Means
 
+The layering below is identical inside each context module.
+
 ### `domain` — the core of the hexagon
 
 Pure business model and contracts. **Contains no framework or infrastructure code.** No `@Entity`, no `@RestController`, no Kafka, no SQL. If you deleted every adapter, this layer would still compile and its rules would still hold.
 
-- **`model`** — Value Objects and the aggregate. `PaymentId`, `PaymentInstrument`, etc. are immutable records. `PaymentInstrument` enforces invariants in its constructor (e.g. PayPal must not carry a funding type; cards must). Invalid objects cannot be constructed.
+- **value objects & aggregate** — `PaymentId`, `PaymentInstrument`, `Payment`, etc. are immutable records. `PaymentInstrument` enforces invariants in its constructor (e.g. PayPal must not carry a funding type; cards must). Invalid objects cannot be constructed.
 - **`port.in`** — driving ports: the use-case interfaces the outside world calls.
 - **`port.out`** — driven ports: capability interfaces the domain needs the outside world to fulfill.
 - **`Command` / `Event`** — `Command` objects carry input *into* a use case; `Event` objects (past tense, e.g. `PaymentRequestedEvent`) are the neutral message that crosses the Kafka boundary.
@@ -199,50 +242,50 @@ These services are **agnostic to how they were triggered** — `SubmitPaymentSer
 The only layer that knows about specific technologies. It translates between the outside world and the domain in both directions:
 
 - **`rest`** — turns HTTP into domain calls, and domain results/errors into HTTP responses. DTOs and validation live here so the domain is never exposed on the wire.
-- **`message`** — turns Kafka messages into domain calls (consumer) and domain events into Kafka messages (producer).
-- **`persistence`** — turns domain objects into JPA entities and back. The `PaymentEntity` is package-private and **never leaves** this package; the domain works only with the `Payment` aggregate.
+- **`kafka`** — turns Kafka messages into domain calls (consumer, in `process`) and domain events into Kafka messages (producer, in `submit`).
+- **`persistence`** (process only) — turns domain objects into JPA entities and back. The `PaymentEntity` is package-private and **never leaves** this package; the domain works only with the `Payment` aggregate. Redis serialization is configured here to emit clean JSON with no type markers, keeping Jackson annotations out of the domain via a mix-in.
 
-**Dependency direction (the golden rule):** `adapter` → `application` → `domain`. Never the reverse. No class in `domain` imports anything from `adapter`.
+**Dependency direction (the golden rule):** `adapter` → `application` → `domain`. Never the reverse. No class in `domain` imports anything from `adapter` — and no module imports another context's module.
 
 ---
 
 ## Request Flow
 
-The full lifecycle of a payment across both domains:
+The full lifecycle of a payment across both contexts (and both context modules):
 
 ```
-   ┌──────────────────────── SUBMIT DOMAIN (stateless) ────────────────────────┐
+   ┌──────────── payment-submit (BOUNDED CONTEXT 1, stateless) ─────────────────┐
    │                                                                            │
-   1. POST /api/v1/payments                                                     
-      → PaymentController (REST driving adapter)                                
-      → SubmitPaymentUseCase  (port.in)                                         
-      → SubmitPaymentService  (application)  ── generates PaymentId             
-      → PaymentEventPublisher (port.out)                                        
-      → PaymentKafkaProducer  (driven adapter)  ── publishes JSON               
-      → returns 202 Accepted + Location header                                  
+   1. POST /api/v1/payments
+      → PaymentController (REST driving adapter)
+      → SubmitPaymentUseCase  (port.in)
+      → SubmitPaymentService  (application)  ── generates PaymentId
+      → PaymentEventPublisher (port.out)
+      → PaymentKafkaProducer  (driven adapter)  ── publishes JSON
+      → returns 202 Accepted + Location header
    │                                                                            │
    └────────────────────────────────┬───────────────────────────────────────── ┘
                                      │  Kafka topic  (the only bridge: JSON contract)
-   ┌─────────────────────────────────▼──────── PROCESS DOMAIN (owns state) ─────┐
+   ┌─────────────────────────────────▼──── payment-process (CONTEXT 2, stateful) ┐
    │                                                                            │
-   2. PaymentKafkaConsumer (driving adapter, @RetryableTopic + @DltHandler)     
-      → reconstructs the message into the process model                         
-      → ProcessPaymentUseCase  (port.in)                                        
-      → ProcessPaymentService  (application)                                    
-      → PaymentRepository      (port.out)                                       
-      → PaymentPersistenceAdapter (driven adapter) ── INSERT into PostgreSQL    
-                                                     ── @CachePut into Redis     
+   2. PaymentKafkaConsumer (driving adapter, @RetryableTopic + @DltHandler)
+      → reconstructs the message into the process model
+      → ProcessPaymentUseCase  (port.in)
+      → ProcessPaymentService  (application)
+      → PaymentRepository      (port.out)
+      → PaymentPersistenceAdapter (driven adapter) ── INSERT into PostgreSQL
+                                                     ── @CachePut into Redis
    │                                                                            │
-   3. GET /api/v1/payments/{uuid}                                               
-      → PaymentQueryController → GetPaymentUseCase → GetPaymentService          
-      → PaymentRepository → PaymentPersistenceAdapter                           
-        └─ @Cacheable: first read hits PostgreSQL and populates Redis;          
-           subsequent reads are served from Redis                              
+   3. GET /api/v1/payments/{uuid}
+      → PaymentQueryController → GetPaymentUseCase → GetPaymentService
+      → PaymentRepository → PaymentPersistenceAdapter
+        └─ @Cacheable: first read hits PostgreSQL and populates Redis;
+           subsequent reads are served from Redis
    │                                                                            │
    └────────────────────────────────────────────────────────────────────────── ┘
 ```
 
-Resilience on the consumer side: `@RetryableTopic` retries transient failures with exponential backoff, and messages that exhaust all attempts are routed to a **Dead Letter Topic** handled by `@DltHandler`.
+Resilience on the consumer side: `@RetryableTopic` retries transient failures with exponential backoff — creating companion `*-retry-*` topics automatically — and messages that exhaust all attempts are routed to a **Dead Letter Topic** handled by `@DltHandler`.
 
 ---
 
@@ -252,6 +295,7 @@ Resilience on the consumer side: `@RetryableTopic` retries transient failures wi
 |---------|-----------|
 | Language / Runtime | Java 25 |
 | Framework | Spring Boot 4.1 |
+| Build | Maven (multi-module) |
 | Web | Spring MVC + Bean Validation |
 | Messaging | Apache Kafka (Spring Kafka, with Retry Topic + DLT) |
 | Persistence | PostgreSQL + Spring Data JPA / Hibernate |
@@ -284,19 +328,35 @@ This brings up Redis, Kafka, and PostgreSQL in the background. To stop and remov
 docker compose down
 ```
 
-> Make sure the ports above are free before starting, and that the credentials in `docker-compose` match the ones in `src/main/resources/application.yaml` (datasource user/password and Redis password).
+> Make sure the ports above are free before starting, and that the credentials in `docker-compose` match the ones in `payment-bootstrap/src/main/resources/application.yaml` (datasource user/password and Redis password).
+
+### Build all modules
+
+From the **project root** (where the parent POM lives):
+
+```bash
+mvn clean install
+```
+
+This builds `payment-submit`, `payment-process`, and `payment-bootstrap` in the correct order (Maven resolves it from the dependency graph) and produces the runnable jar in `payment-bootstrap/target/`.
 
 ### Start the application
 
-Once the infrastructure is up:
+Run it through the bootstrap module:
 
 ```bash
-mvn spring-boot:run
+mvn -pl payment-bootstrap spring-boot:run
+```
+
+or, after `mvn install`, from the produced jar:
+
+```bash
+java -jar payment-bootstrap/target/payment.jar
 ```
 
 The application starts on **http://localhost:8080**.
 
-> **Note on hot reload:** the project includes `spring-boot-devtools`. When running from an IDE with *Build Automatically* enabled, saving a source file triggers an automatic restart.
+> **Note on hot reload:** the bootstrap module includes `spring-boot-devtools`. When running from an IDE with *Build Automatically* enabled, saving a source file triggers an automatic restart.
 
 ---
 
