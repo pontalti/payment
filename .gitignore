@@ -15,7 +15,7 @@ buildNumber.properties
 *.iml
 *.ipr
 *.iws
-out/
+/out/
 
 ### Eclipse (caso alguém abra noutro IDE) ###
 .classpath
