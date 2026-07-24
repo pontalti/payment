@@ -3,6 +3,8 @@ package com.payment.domain.process.model;
 import java.util.Objects;
 import java.util.UUID;
 
+import xyz.block.uuidv7.MonotonicUUIDv7;
+
 public record PaymentId(UUID value) {
 
     public PaymentId {
@@ -10,7 +12,7 @@ public record PaymentId(UUID value) {
     }
 
     public static PaymentId newId() {
-        return new PaymentId(UUID.randomUUID());
+        return new PaymentId(MonotonicUUIDv7.generate());
     }
 
     public static PaymentId of(String raw) {

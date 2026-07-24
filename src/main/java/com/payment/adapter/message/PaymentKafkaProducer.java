@@ -14,16 +14,15 @@ import tools.jackson.databind.ObjectMapper;
 @Component
 public class PaymentKafkaProducer implements PaymentEventPublisher {
 
-    @Value("${spring.kafka.topic.name}")
-    private String topic;
+    private final String topic;
 
     private final KafkaTemplate<String, String> kafkaTemplate;
     private final ObjectMapper objectMapper;
 
-    public PaymentKafkaProducer(KafkaTemplate<String, String> kafkaTemplate,
-                                ObjectMapper objectMapper) {
+    public PaymentKafkaProducer(KafkaTemplate<String, String> kafkaTemplate, ObjectMapper objectMapper, @Value("${spring.kafka.topic.name}") String topic) {
         this.kafkaTemplate = kafkaTemplate;
         this.objectMapper = objectMapper;
+        this.topic = topic;
     }
 
     @Override

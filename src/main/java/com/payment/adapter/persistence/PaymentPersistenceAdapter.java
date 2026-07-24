@@ -3,6 +3,7 @@ package com.payment.adapter.persistence;
 import java.util.List;
 import java.util.Optional;
 
+import org.springframework.cache.annotation.CacheConfig;
 import org.springframework.cache.annotation.CacheEvict;
 import org.springframework.cache.annotation.CachePut;
 import org.springframework.cache.annotation.Cacheable;
@@ -22,10 +23,9 @@ import lombok.extern.slf4j.Slf4j;
 
 @Slf4j
 @Component
+@CacheConfig(cacheResolver = "paymentCacheResolver")
 public class PaymentPersistenceAdapter implements PaymentRepository{
 
-	private static final String CACHE_NAME = "payments";
-	
     private final PaymentJpaRepository jpaRepository;
 
     public PaymentPersistenceAdapter(PaymentJpaRepository jpaRepository) {
@@ -33,7 +33,7 @@ public class PaymentPersistenceAdapter implements PaymentRepository{
     }
 
     @Override
-    @CachePut(cacheNames = CACHE_NAME, key = "#payment.id().value().toString()")
+    @CachePut(key = "#payment.id().value().toString()")
     public Payment save(Payment payment) {
         PaymentEntity entity = toEntity(payment);
         PaymentEntity saved = this.jpaRepository.save(entity);
@@ -41,10 +41,9 @@ public class PaymentPersistenceAdapter implements PaymentRepository{
     }
 
     @Override
-    @Cacheable(cacheNames = CACHE_NAME, key = "#id.value().toString()")
+    @Cacheable(key = "#id.value().toString()", unless = "#result == null")
     public Optional<Payment> findById(PaymentId id) {
-        return this.jpaRepository.findByUuid(id.value())
-                .map(this::toDomain);
+        return this.jpaRepository.findByUuid(id.value()).map(this::toDomain);
     }
     
     @Override
@@ -63,16 +62,16 @@ public class PaymentPersistenceAdapter implements PaymentRepository{
     }
     
     @Override
-    @CachePut(cacheNames = CACHE_NAME, key = "#id.value().toString()")
+    @CachePut(key = "#id.value().toString()")
     public Payment updateStatus(PaymentId id, PaymentStatus status) {
         this.jpaRepository.updateStatusByUuid(id.value(), status);
         return this.jpaRepository.findByUuid(id.value())
-                .map(this::toDomain)
-                .orElseThrow(() -> new PaymentNotFoundException(id));
+					                .map(this::toDomain)
+					                .orElseThrow(() -> new PaymentNotFoundException(id));
     }
     
     @Override
-    @CacheEvict(cacheNames = CACHE_NAME, key = "#id.value().toString()")
+    @CacheEvict(key = "#id.value().toString()")
     public void delete(PaymentId id) {
         int deleted = this.jpaRepository.deleteByUuid(id.value());
         if (deleted == 0) {

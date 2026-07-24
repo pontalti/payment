@@ -57,6 +57,11 @@ spring:
           idempotence: true
         max-in-flight-requests-per-connection: 5
 
+cache:
+  ttl: 10m
+  payments:
+    name: payments
+
 # Swagger UI at http://localhost:8080/swagger-ui.html
 springdoc:
   swagger-ui:
@@ -66,7 +71,7 @@ springdoc:
 
 info:
   app:
-    name: Game 2048
+    name: Payment
     description: Payment service - Spring Boot Actuator
     version: 1.0.0
 
