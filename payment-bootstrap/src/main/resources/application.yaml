@@ -1,5 +1,13 @@
 server:
   port: 8080
+  tomcat:
+    accesslog:
+      enabled: true
+      directory: logs
+      prefix: access_log
+      suffix: .log
+      file-date-format: .yyyy-MM-dd
+      pattern: '%h %l %u %t "%r" %s %b %D'
 spring:
   application:
     name: payment
@@ -18,7 +26,7 @@ spring:
       connection-timeout: 30000
   jpa:
     hibernate:
-      ddl-auto: update          # use 'update' só em dev inicial; prefira Flyway/Liquibase
+      ddl-auto: update          # use 'update' only in early dev; prefer Flyway/Liquibase
     properties:
       hibernate:
         dialect: org.hibernate.dialect.PostgreSQLDialect
@@ -38,6 +46,10 @@ spring:
   kafka:
     topic:
       name: my-topic
+    template:
+      observation-enabled: true    # tracing on the producer side (submit)
+    listener:
+      observation-enabled: true    # tracing on the consumer side (process)
     bootstrap-servers: localhost:9092
     consumer:
       group-id: payment
@@ -59,8 +71,12 @@ spring:
 
 logging:
   level:
-    org.hibernate.SQL: DEBUG
-    org.hibernate.orm.jdbc.bind: TRACE
+    root: INFO
+    "[org.apache.catalina]": INFO
+    "[org.apache.coyote]": INFO
+    "[org.apache.tomcat]": INFO
+    "[org.hibernate.SQL]": DEBUG
+    "[org.hibernate.orm.jdbc.bind]": TRACE
 
 cache:
   ttl: 10m
@@ -93,3 +109,20 @@ management:
     web:
       exposure:
         include: "*"
+  tracing:
+    sampling:
+      probability: 1.0     # dev: 100%. In production, reduce it (e.g. 0.1)
+  otlp:
+    metrics:
+      export:
+        url: http://localhost:4318/v1/metrics
+  opentelemetry:
+    tracing:
+      export:
+        otlp:
+          endpoint: http://localhost:4318/v1/traces
+    logging:
+      export:
+        schedule-delay: 5s
+        otlp:
+          endpoint: http://localhost:4318/v1/logs

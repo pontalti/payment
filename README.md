@@ -20,6 +20,7 @@ Each bounded context is a **separate Maven module**, so the independence between
 - [Request Flow](#request-flow)
 - [Technology Stack](#technology-stack)
 - [Running the Application](#running-the-application)
+- [Observability](#observability)
 - [Testing](#testing)
 - [Build Notes](#build-notes)
 - [API Endpoints](#api-endpoints)
@@ -356,6 +357,9 @@ Resilience on the consumer side: `@RetryableTopic` retries transient failures wi
 | JSON | Jackson 3 (`tools.jackson`) |
 | Architecture testing | ArchUnit (JUnit 5) |
 | Integration testing | Testcontainers (Postgres, Kafka, Redis) |
+| Observability | OpenTelemetry (`spring-boot-starter-opentelemetry`) → OTLP; Micrometer with OTel semantic conventions |
+| Logs / correlation | Logback → OpenTelemetry appender → Loki, correlated by `trace_id` |
+| Telemetry backend | Grafana LGTM — Loki, Tempo, Prometheus, Grafana (dev only) |
 
 ---
 
@@ -367,10 +371,11 @@ All required infrastructure is provided as **`docker-compose`** files inside the
 
 ```
 docker/
-├── docker-compose.yml            # root file — brings up everything (Compose project: dev-infra)
-├── postgres/docker-compose.yml   # PostgreSQL + pgAdmin
-├── kafka/docker-compose.yml      # Kafka (KRaft, single node) + Kafka-UI
-└── redis/docker-compose.yml      # Redis + RedisInsight
+├── docker-compose.yml                 # root file — brings up everything (Compose project: dev-infra)
+├── postgres/docker-compose.yml        # PostgreSQL + pgAdmin
+├── kafka/docker-compose.yml           # Kafka (KRaft, single node) + Kafka-UI
+├── redis/docker-compose.yml           # Redis + RedisInsight
+└── observability/docker-compose.yml   # Grafana LGTM (OpenTelemetry backend) + provisioned dashboard
 ```
 
 The root file redefines nothing — it uses Compose's **`include`** directive to pull in the three per-service files:
@@ -382,6 +387,7 @@ include:
   - postgres/docker-compose.yml
   - kafka/docker-compose.yml
   - redis/docker-compose.yml
+  - observability/docker-compose.yml
 ```
 
 Running everything as **one Compose project** (rather than three isolated stacks) means all services share a single network, resolve each other by service name, and are managed together — up, down, logs, and status in a single command.
@@ -390,7 +396,7 @@ Running everything as **one Compose project** (rather than three isolated stacks
 
 ```bash
 cd docker
-docker compose up -d          # start Postgres, Kafka, Redis (+ their UIs)
+docker compose up -d          # start Postgres, Kafka, Redis, Grafana LGTM (+ their UIs)
 docker compose ps             # status / health of all services
 docker compose logs -f kafka  # follow the logs of a single service
 docker compose down           # stop everything (data volumes kept)
@@ -412,6 +418,7 @@ Each stack also ships a **management UI**, useful for inspecting state while dev
 | pgAdmin | [http://localhost:5050](http://localhost:5050) | desktop mode — no login prompt |
 | Kafka-UI | [http://localhost:8082](http://localhost:8082) | — |
 | RedisInsight | [http://localhost:5540](http://localhost:5540) | — |
+| Grafana | [http://localhost:3000](http://localhost:3000) | `admin` / `admin` — telemetry, see [Observability](#observability) |
 
 > **Compose version:** the `include` directive requires **Docker Compose v2.20+** (any recent Docker Desktop / Engine). On older versions, either upgrade or combine the files explicitly: `docker compose -f postgres/docker-compose.yml -f kafka/docker-compose.yml -f redis/docker-compose.yml up -d`.
 
@@ -444,6 +451,136 @@ java -jar payment-bootstrap/target/payment.jar
 The application starts on **http://localhost:8080**.
 
 > **Note on hot reload:** the bootstrap module includes `spring-boot-devtools`. When running from an IDE with *Build Automatically* enabled, saving a source file triggers an automatic restart.
+
+---
+
+## Observability
+
+The service is fully instrumented for **observability** — metrics, traces, and logs — using **OpenTelemetry**. Everything is exported over **OTLP** to a local **Grafana LGTM** stack (Loki, Tempo, Prometheus, Grafana) that runs as part of the dev infrastructure, and a custom Grafana dashboard is provisioned automatically as the home page.
+
+### Dependencies
+
+Added to `payment-bootstrap`:
+
+| Dependency | Purpose |
+|------------|---------|
+| `spring-boot-starter-actuator` | Health / info / metrics endpoints |
+| `spring-boot-starter-opentelemetry` | OpenTelemetry API + auto-configuration |
+| `io.micrometer:micrometer-registry-otlp` | Exports **metrics** over OTLP |
+| `io.micrometer:micrometer-tracing-bridge-otel` | Exports **traces** over OTLP |
+| `io.opentelemetry.instrumentation:opentelemetry-logback-appender-1.0` | Ships **logs** over OTLP |
+
+### Configuration (`application.yaml`)
+
+OTLP export points at the collector on `localhost:4318`, and Kafka trace propagation is enabled on both sides:
+
+```yaml
+spring:
+  kafka:
+    template:
+      observation-enabled: true    # tracing on the producer side (submit)
+    listener:
+      observation-enabled: true    # tracing on the consumer side (process)
+
+management:
+  tracing:
+    sampling:
+      probability: 1.0             # dev: 100%; lower in production (e.g. 0.1)
+  otlp:
+    metrics:
+      export:
+        url: http://localhost:4318/v1/metrics
+  opentelemetry:
+    tracing:
+      export:
+        otlp:
+          endpoint: http://localhost:4318/v1/traces
+    logging:
+      export:
+        schedule-delay: 5s
+        otlp:
+          endpoint: http://localhost:4318/v1/logs
+```
+
+### Metrics in the OpenTelemetry naming (`ObservabilityMetricsConfig`)
+
+`com.payment.config.ObservabilityMetricsConfig` re-registers the JVM / process metric binders using Micrometer's **OpenTelemetry semantic-convention** meter conventions, so metrics carry OTel-standard names and attributes (e.g. `jvm.memory.used` with `jvm.memory.type`) instead of Micrometer's native naming. This is what makes the OpenTelemetry Grafana dashboards match the data. Each binder bean has a `@ConditionalOnMissingBean` default in Spring Boot, so these **replace** the defaults with no duplicate metrics.
+
+A consequence worth knowing: a few metric names differ from the Micrometer defaults — threads are `jvm_thread_count` (not `jvm_threads_live`), classes are `jvm_class_count_classes`, and process CPU is `jvm_cpu_recent_utilization` (not `process_cpu_usage`).
+
+### The Kafka payoff — one trace across two contexts
+
+Because observation is enabled on the Kafka producer and consumer, the trace context travels in the message header. A single payment therefore produces **one end-to-end trace** spanning `POST → produce → consume → INSERT → cache`, crossing both bounded contexts. Without it, the trace would "die" at the broker.
+
+### Logs → Loki (with trace correlation)
+
+Application logs — including the Tomcat framework logs (`org.apache.catalina`, `org.apache.coyote`, `org.apache.tomcat`, enabled at `INFO`) — are shipped to **Loki** through the **OpenTelemetry Logback appender**, and correlated with traces by `trace_id`. Three pieces make this work:
+
+1. **`logback-spring.xml`** declares an `OTEL` appender (`io.opentelemetry.instrumentation.logback.appender.v1_0.OpenTelemetryAppender`) attached to the root logger, alongside a `CONSOLE` appender whose pattern includes `trace_id=%X{trace_id} span_id=%X{span_id}` — so every console line and every log record carries its trace/span context.
+2. **`com.payment.config.OpenTelemetryLogbackConfiguration`** installs the OpenTelemetry SDK instance into that appender at startup (`@PostConstruct` → `OpenTelemetryAppender.install(openTelemetry)`). This wiring is required because Logback builds the appender before the Spring context exists, so the OTel instance has to be injected once it is available.
+3. **`application.yaml`** sets the OTLP logs endpoint (`management.opentelemetry.logging.export.otlp.endpoint`) with a 5-second batch delay.
+
+The result: in Grafana you can open a trace in Tempo and jump straight to its correlated logs in Loki. (Separately, Tomcat's **access log** is written to files under `logs/` via `server.tomcat.accesslog` — that one is file-based and independent of the Loki pipeline.)
+
+### Where the instrumentation lives (hexagonal note)
+
+Observability is cross-cutting infrastructure, so it stays at the edges. HTTP, Kafka, and JDBC spans are created automatically in the adapters, where the technology already lives — the **domain never sees any of it**, and the `HexagonalLayeringTest` stays green. Both observability config classes live in the bootstrap module (composition root), never in a bounded context or the domain.
+
+### Backend + provisioned dashboard
+
+The Grafana LGTM stack runs as a dev container in `docker/observability/`, wired into the root compose. It bundles the OpenTelemetry Collector + Loki (logs) + Tempo (traces) + Prometheus (metrics) + Grafana, receiving OTLP on `4317`/`4318` and serving the UI on `3000`.
+
+A custom dashboard — **"Payment — JVM (OTel semconv)"** (14 panels) — is **provisioned automatically** and set as the Grafana home page (`GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH`), so it appears the moment you open `localhost:3000`, with no manual import:
+
+```
+docker/observability/
+├── docker-compose.yml
+└── grafana/
+    ├── dashboards/payment-jvm-dashboard.json         # the dashboard (14 panels)
+    └── provisioning/dashboards/payment-provider.yaml # file provider that loads it
+```
+
+It covers JVM memory (heap / non-heap by pool, utilization), threads, classes, CPU, GC, HTTP (request rate, error rate, latency), the HikariCP connection pool, and log events. Drop any additional dashboard JSON into `grafana/dashboards/` and it is picked up on the next container start.
+
+> The `grafana/otel-lgtm` image is for **development / demo only** — not production. In production, point the same OTLP config at your real collector / managed backend.
+
+### Local URLs
+
+With the infrastructure up (`docker compose up -d` from `docker/`) and the app running, these are the local endpoints:
+
+| UI / Endpoint | URL | What it's for |
+|---------------|-----|---------------|
+| **Grafana** (telemetry) | [http://localhost:3000](http://localhost:3000) | Metrics, traces, logs. Login `admin` / `admin`. Opens on the Payment JVM dashboard. |
+| **Swagger UI** | [http://localhost:8080/swagger-ui/index.html](http://localhost:8080/swagger-ui/index.html) | Exercise the REST adapter (submit / query payments). |
+| **Kafka UI** | [http://localhost:8082](http://localhost:8082) | Browse topics, messages, consumer groups. |
+| **Postgres UI** (pgAdmin) | [http://localhost:5050](http://localhost:5050) | Inspect tables, run SQL. |
+| **Redis UI** (RedisInsight) | [http://localhost:5540](http://localhost:5540) | Inspect cached keys / TTLs. |
+| **Actuator** | [http://localhost:8081/actuator](http://localhost:8081/actuator) | Health, info, metrics (management port `8081`). |
+
+### Grafana Explore — handy queries
+
+Beyond the dashboard, **Grafana → Explore** lets you run ad-hoc queries. For metrics, pick the **Prometheus** data source, switch the editor to **Code**, and start typing a prefix to use the autocomplete:
+
+| Query (Prometheus) | Shows |
+|--------------------|-------|
+| `jvm_memory_used_bytes{jvm_memory_type="heap"}` | Heap memory used, per pool (`jvm_memory_pool_name`) |
+| `jvm_memory_committed_bytes{jvm_memory_type="heap"}` | Heap committed (utilization baseline under G1) |
+| `jvm_cpu_recent_utilization` | Process CPU utilization |
+| `jvm_thread_count` | Live JVM threads |
+| `jvm_class_count_classes` | Loaded classes |
+| `rate(jvm_gc_pause_milliseconds_count[5m])` | GC pause rate |
+| `http_server_requests_milliseconds_count` | HTTP request count (after you call the API) |
+| `rate(http_server_requests_milliseconds_count{status=~"5.."}[5m])` | HTTP 5xx rate |
+| `hikaricp_connections_active` | Active DB connections |
+| `logback_events_total` | Log events by level |
+
+For logs, pick the **Loki** data source and query by service, e.g. `{service_name="payment"}` — or open a trace in **Tempo** and follow the trace-to-logs link to see the correlated log lines.
+
+> Metric names follow **OpenTelemetry semantic conventions** because of `ObservabilityMetricsConfig`, and HTTP timers use the `_milliseconds` suffix. When in doubt, the Explore autocomplete lists exactly what exists.
+
+### Observability in tests
+
+Integration tests run against Testcontainers (Postgres, Kafka, Redis) but **no collector**, so the `test` profile turns OTLP export off to avoid "failed to export" noise. And a fast, infrastructure-free fitness function — `ObservabilityMetricsConfigTest` — asserts the JVM binders emit OTel semantic-convention names, so the contract cannot silently regress.
 
 ---
 

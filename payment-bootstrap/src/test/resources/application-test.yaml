@@ -21,5 +21,17 @@ spring:
       auto-offset-reset: earliest
 
 cache:
-  name: payments
   ttl: 10m
+  payments:
+    name: payments
+
+management:
+  tracing:
+    export:
+      enabled: false        # do not export spans (nothing is sent to a collector)
+    sampling:
+      probability: 0.0      # belt-and-suspenders: sample nothing, so no spans are recorded
+  otlp:
+    metrics:
+      export:
+        enabled: false      # do not push metrics over OTLP

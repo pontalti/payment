@@ -1,0 +1,34 @@
+services:
+  # All-in-one observability backend for development:
+  # OpenTelemetry Collector + Loki (logs) + Tempo (traces) + Prometheus (metrics) + Grafana.
+  # Receives OTLP and ships Grafana pre-configured with the three data sources.
+  #
+  # The custom "Payment - JVM (OTel semconv)" dashboard is provisioned automatically
+  # and set as the Grafana home page (GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH below).
+  otel-lgtm:
+    image: grafana/otel-lgtm:0.28.0
+    container_name: otel-lgtm-dev
+    restart: unless-stopped
+    ports:
+      - "3000:3000"   # Grafana UI (default login: admin / admin)
+      - "4317:4317"   # OTLP gRPC - OpenTelemetry Collector receiver
+      - "4318:4318"   # OTLP HTTP - the endpoint the application uses by default
+    environment:
+      # Make the custom Payment JVM dashboard the landing page when Grafana opens.
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /otel-lgtm/grafana/conf/provisioning/dashboards/custom/payment-jvm-dashboard.json
+    volumes:
+      - lgtm_data:/data   # persist metrics/traces/logs across restarts
+      # Provisioning: the dashboard JSON(s) go into the `custom` folder, and the file
+      # provider (mounted next to Grafana's built-in providers) tells Grafana to load them.
+      - ./grafana/dashboards:/otel-lgtm/grafana/conf/provisioning/dashboards/custom:ro
+      - ./grafana/provisioning/dashboards/payment-provider.yaml:/otel-lgtm/grafana/conf/provisioning/dashboards/payment-provider.yaml:ro
+    healthcheck:
+      # the image creates /tmp/ready once the stack has finished starting
+      test: ["CMD-SHELL", "test -f /tmp/ready || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+volumes:
+  lgtm_data:

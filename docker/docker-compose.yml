@@ -1,16 +1,16 @@
 # docker/docker-compose.yml
-# Arquivo raiz que sobe toda a infraestrutura de desenvolvimento
-# (Postgres + pgAdmin, Kafka + Kafka-UI, Redis + RedisInsight)
-# combinando os três compose separados via diretiva `include`.
+# Root file that starts the whole development infrastructure
+# (Postgres + pgAdmin, Kafka + Kafka-UI, Redis + RedisInsight, LGTM observability)
+# by combining the separate compose files via the `include` directive.
 #
-# Requer Docker Compose v2.20+ (Docker Desktop / Engine recentes).
+# Requires Docker Compose v2.20+ (recent Docker Desktop / Engine).
 #
-# Uso (a partir da pasta docker/):
-#   docker compose up -d          # sobe tudo
+# Usage (from the docker/ folder):
+#   docker compose up -d          # start everything
 #   docker compose ps             # status
-#   docker compose logs -f kafka  # logs de um serviço
-#   docker compose down           # derruba tudo (mantém os volumes)
-#   docker compose down -v        # derruba tudo e apaga os volumes
+#   docker compose logs -f kafka  # logs of a single service
+#   docker compose down           # stop everything (volumes kept)
+#   docker compose down -v        # stop everything and wipe the volumes
 
 name: dev-infra
 
@@ -18,3 +18,4 @@ include:
   - postgres/docker-compose.yml
   - kafka/docker-compose.yml
   - redis/docker-compose.yml
+  - observability/docker-compose.yml
