@@ -1,0 +1,25 @@
+# Test profile — infrastructure comes from Testcontainers (@ServiceConnection),
+# so no host/port/credentials are set here; they are injected at runtime.
+spring:
+  # Run schema.sql against the container before Hibernate validates the mapping.
+  sql:
+    init:
+      mode: always
+      schema-locations: classpath:schema.sql
+  jpa:
+    hibernate:
+      # The container starts empty; schema.sql owns the DDL, Hibernate only validates.
+      ddl-auto: validate
+    # Ensure schema.sql runs before Hibernate inspects the tables.
+    defer-datasource-initialization: false
+    open-in-view: false
+  kafka:
+    topic:
+      name: my-topic
+    consumer:
+      # Read from the start so a message produced during the test is not missed.
+      auto-offset-reset: earliest
+
+cache:
+  name: payments
+  ttl: 10m

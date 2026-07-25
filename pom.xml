@@ -32,11 +32,13 @@
         <spring.retry.version>2.0.13</spring.retry.version>
         <springdoc.version>3.0.3</springdoc.version>
         <archunit.version>1.4.2</archunit.version>
+        <testcontainers-redis.version>2.2.4</testcontainers-redis.version>
+        <testcontainers.version>1.21.4</testcontainers.version>
     </properties>
 
     <dependencyManagement>
         <dependencies>
-            <!-- internal modules: version declared once -->
+            <!-- módulos internos: versão declarada uma vez só -->
             <dependency>
                 <groupId>com.payment</groupId>
                 <artifactId>payment-submit</artifactId>
@@ -48,7 +50,7 @@
                 <version>${project.version}</version>
             </dependency>
 
-            <!-- third-party libraries outside the Boot BOM -->
+            <!-- terceiros fora do BOM do Boot -->
             <dependency>
                 <groupId>org.mapstruct</groupId>
                 <artifactId>mapstruct</artifactId>
@@ -73,7 +75,7 @@
     </dependencyManagement>
 
     <dependencies>
-        <!-- only what EVERY module uses -->
+        <!-- só o que TODO módulo usa -->
         <dependency>
             <groupId>org.projectlombok</groupId>
             <artifactId>lombok</artifactId>
@@ -83,7 +85,7 @@
 
     <build>
         <plugins>
-            <!-- inherited by all modules -->
+            <!-- herdado por todos os módulos -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-compiler-plugin</artifactId>

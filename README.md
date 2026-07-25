@@ -4,7 +4,7 @@ A sample payment service built with **Spring Boot 4.1** and **Java 25**, designe
 
 The service receives a payment request over REST, publishes it to Kafka, and a consumer processes the message and persists it in PostgreSQL. Reads are served through a Redis cache.
 
-Each bounded context is a **separate Maven module**, so the independence between them is enforced by the build itself — not merely by convention.
+Each bounded context is a **separate Maven module**, so the independence between them is enforced by the build itself — not merely by convention. A dedicated **architecture-tests** module turns the hexagonal rules into automated **fitness functions** that fail the build on violation.
 
 ---
 
@@ -13,12 +13,15 @@ Each bounded context is a **separate Maven module**, so the independence between
 - [Architecture Overview](#architecture-overview)
 - [Maven Module Layout](#maven-module-layout)
 - [The Two Bounded Contexts](#the-two-bounded-contexts)
+- [Architecture Tests (Fitness Functions)](#architecture-tests-fitness-functions)
 - [Hexagonal Architecture Explained](#hexagonal-architecture-explained)
 - [Project Structure](#project-structure)
 - [What Each Layer Means](#what-each-layer-means)
 - [Request Flow](#request-flow)
 - [Technology Stack](#technology-stack)
 - [Running the Application](#running-the-application)
+- [Testing](#testing)
+- [Build Notes](#build-notes)
 - [API Endpoints](#api-endpoints)
 - [Testing with Swagger](#testing-with-swagger)
 
@@ -32,29 +35,31 @@ The domain sits at the center of a hexagon. Everything outside — REST controll
 
 The single most important rule: **dependencies always point inward.** Adapters depend on the domain; the domain never depends on adapters. The domain does not know Kafka, PostgreSQL, or HTTP exist. This makes the business logic independent, testable in isolation, and resistant to changes in infrastructure.
 
-On top of that hexagonal core, the project is split into **three Maven modules** so that the boundary between the two bounded contexts is guaranteed at compile time: `payment-submit` and `payment-process` cannot reference each other's code, because neither declares a dependency on the other.
+On top of that hexagonal core, the project is split into **Maven modules** so that the boundary between the two bounded contexts is guaranteed at compile time: `payment-submit` and `payment-process` cannot reference each other's code, because neither declares a dependency on the other. A separate test module then asserts the internal layering rules automatically.
 
 ---
 
 ## Maven Module Layout
 
-The project is a **multi-module Maven build**. A parent (aggregator) POM at the root declares the three modules and centralizes versions and the build plugin configuration.
+The project is a **multi-module Maven build**. A parent (aggregator) POM at the root declares the modules and centralizes versions and the build plugin configuration.
 
 ```
 payment/                         # parent / aggregator POM (packaging: pom)
 │
 ├── payment-submit/              # BOUNDED CONTEXT 1 — receive & forward (stateless)
 ├── payment-process/             # BOUNDED CONTEXT 2 — consume & persist (owns state)
-└── payment-bootstrap/           # composition root — main class, config, packaging
+├── payment-bootstrap/           # composition root — main class, config, packaging
+└── payment-architecture-tests/  # fitness functions — enforce the rules at build time
 ```
 
 Responsibilities and dependencies of each module:
 
 | Module | Depends on | Contains |
 |--------|-----------|----------|
-| `payment-submit` | *(neither other module)* | The full `submit` hexagon: domain, application service, REST + Kafka producer adapters. |
-| `payment-process` | *(neither other module)* | The full `process` hexagon: domain, application services, REST query + Kafka consumer + JPA/Redis persistence adapters. |
+| `payment-submit` | *(neither context module)* | The full `submit` hexagon: domain, application service, REST + Kafka producer adapters. |
+| `payment-process` | *(neither context module)* | The full `process` hexagon: domain, application services, REST query + Kafka consumer + JPA/Redis persistence adapters. |
 | `payment-bootstrap` | `payment-submit`, `payment-process` | `PaymentApplication` (the `@SpringBootApplication`), `application.yaml`, `schema.sql`, and the Spring Boot Maven plugin that produces the runnable fat jar. |
+| `payment-architecture-tests` | `payment-submit`, `payment-process` *(test scope)* | ArchUnit rules that assert the hexagonal layering and the context isolation. Contains no production code. |
 
 **Why this matters:** the two context modules have **no dependency on each other**. The compiler will refuse any accidental import from `submit` into `process` or vice versa. What convention asked for before ("never share domain classes"), the build now enforces. If the `process` side ever needs to become a standalone microservice, it can be lifted out with its module intact — there was never a compile-time link to sever.
 
@@ -89,6 +94,41 @@ Because these are genuinely separate bounded contexts, each one has its **own co
 The only bridge between the two contexts is the **Kafka message** — a JSON contract made of primitive fields (strings, numbers). Neither context imports classes from the other; with the modular split, neither *can*. The `submit` side translates its domain into the event; the `process` side translates the event into its own domain.
 
 This buys a concrete benefit: if the `process` side ever needs to become a separate microservice/deployment, it can be extracted without touching `submit`, because there was never a compile-time dependency between them. The price paid — duplicated value objects — buys that independence, and the module boundary makes the price non-negotiable.
+
+---
+
+## Architecture Tests (Fitness Functions)
+
+The module split guarantees the boundary **between** contexts at compile time. But the rules **inside** each context — the domain staying pure, adapters not reaching into one another, `@Entity` never leaking out of persistence — are conventions the compiler alone does not enforce. The `payment-architecture-tests` module closes that gap with **[ArchUnit](https://www.archunit.org/)**: plain JUnit tests that read the compiled bytecode and assert architectural rules. A violation fails the build, exactly like a broken unit test.
+
+This is a deliberately lighter tool than more modules. Splitting further by technical layer (one module for REST, one for Kafka, one for persistence) would fight the split-by-context that already exists and reintroduce cross-context coupling through shared technical modules. A test module does not: it depends on both contexts in **test scope**, inspects them, and ships no production code.
+
+### Rules enforced
+
+**`HexagonalLayeringTest`** — the inward-pointing dependency rule, applied inside every context:
+
+- the domain depends on **nothing** infrastructural — not adapters, not application services, not Spring, JPA, Kafka, Hibernate, or Jackson;
+- application services do not depend on adapters;
+- adapters do not reach into each other (REST must not touch Kafka or persistence directly — they talk through ports);
+- `@Entity` classes live **only** in `adapter.persistence.model`, so the JPA entity never leaks into the domain;
+- port contracts are interfaces (the event/command records that sit next to a port are data, and are excluded).
+
+**`BoundedContextIsolationTest`** — the context boundary, asserted in both directions:
+
+- `submit` must not depend on `com.payment.process..`;
+- `process` must not depend on `com.payment.submit..`.
+
+The isolation test is redundant with the module boundary *today* — the build already forbids the dependency. It is kept as a second, explicit line of defense that also **documents the intent**: if the modules were ever merged, or a shared module introduced, this test would still catch a cross-context import. It is what guarantees the duplicated value objects remain independent copies rather than a shortcut waiting to happen.
+
+### Running them
+
+The tests run as part of the normal build — no infrastructure required, since they only inspect bytecode:
+
+```bash
+mvn -pl payment-architecture-tests test
+```
+
+Or as part of the full reactor with `mvn test` / `mvn verify` from the root. Because a rule violation fails the build, wiring `mvn verify` into CI is enough to keep the architecture from eroding over time.
 
 ---
 
@@ -129,7 +169,7 @@ Note the symmetry: **driving adapters call ports; driven adapters implement port
 
 ## Project Structure
 
-Each context module follows the same internal hexagonal layout (`domain` → `application` → `adapter`). At the **root of the project** there is a `docker/` folder containing a `docker-compose` file that provisions all the required infrastructure — **Redis, Kafka, and PostgreSQL** — so the whole environment can be started with a single command (see [Running the Application](#running-the-application)).
+Each context module follows the same internal hexagonal layout (`domain` → `application` → `adapter`). At the **root of the project** there is a `docker/` folder containing `docker-compose` files that provision all the required infrastructure — **Redis, Kafka, and PostgreSQL** — so the whole environment can be started for local runs (see [Running the Application](#running-the-application)).
 
 ```
 payment/                                        # parent / aggregator POM
@@ -208,12 +248,24 @@ payment/                                        # parent / aggregator POM
 │                   ├── RedisCacheConfig.java       # Redis cache manager (Jackson 3 typing)
 │                   └── PaymentIdMixin.java          # keeps the domain free of Jackson annotations
 │
-└── payment-bootstrap/                          # ── MODULE: composition root ──
-    ├── com.payment
-    │   └── PaymentApplication.java             #   @SpringBootApplication entry point
-    └── src/main/resources
-        ├── application.yaml                    #   all runtime configuration lives here
-        └── schema.sql
+├── payment-bootstrap/                          # ── MODULE: composition root ──
+│   ├── com.payment
+│   │   └── PaymentApplication.java             #   @SpringBootApplication entry point
+│   └── src
+│       ├── main/resources
+│       │   ├── application.yaml                #   all runtime configuration lives here
+│       │   └── schema.sql
+│       └── test
+│           ├── java/com/payment
+│           │   ├── AbstractIntegrationTest.java #   Testcontainers base (Postgres, Kafka, Redis)
+│           │   └── PaymentApplicationTests.java #   context-load test on real infrastructure
+│           └── resources
+│               └── application.yaml            #   test profile (schema.sql + validate)
+│
+└── payment-architecture-tests/                 # ── MODULE: fitness functions (test only) ──
+    └── src/test/java/com/payment/architecture
+        ├── HexagonalLayeringTest.java          #   domain purity, layer direction, @Entity confinement
+        └── BoundedContextIsolationTest.java    #   submit ⇎ process
 ```
 
 ---
@@ -302,6 +354,8 @@ Resilience on the consumer side: `@RetryableTopic` retries transient failures wi
 | Cache | Redis (Spring Cache, Jackson 3 serialization) |
 | API Docs | springdoc-openapi (Swagger UI) |
 | JSON | Jackson 3 (`tools.jackson`) |
+| Architecture testing | ArchUnit (JUnit 5) |
+| Integration testing | Testcontainers (Postgres, Kafka, Redis) |
 
 ---
 
@@ -309,26 +363,15 @@ Resilience on the consumer side: `@RetryableTopic` retries transient failures wi
 
 ### Prerequisites — infrastructure via Docker
 
-All required infrastructure is provided as a **`docker-compose`** file inside the **`docker/` folder at the root of the project**. It provisions the three backing services the application depends on:
+All required infrastructure is provided as **`docker-compose`** files inside the **`docker/` folder at the root of the project**. It provisions the three backing services the application depends on:
 
 - **PostgreSQL** on `localhost:5432` (database `appdb`)
 - **Kafka broker** on `localhost:9092`
 - **Redis** on `localhost:6379` (with the password configured in `application.yaml`)
 
-Start the full stack with a single command:
+Start each service with `docker compose up -d` from its folder under `docker/`, then stop them with `docker compose down`.
 
-```bash
-cd docker
-docker compose up -d
-```
-
-This brings up Redis, Kafka, and PostgreSQL in the background. To stop and remove them:
-
-```bash
-docker compose down
-```
-
-> Make sure the ports above are free before starting, and that the credentials in `docker-compose` match the ones in `payment-bootstrap/src/main/resources/application.yaml` (datasource user/password and Redis password).
+> Make sure the ports above are free before starting, and that the credentials in the compose files match the ones in `payment-bootstrap/src/main/resources/application.yaml` (datasource user/password and Redis password).
 
 ### Build all modules
 
@@ -338,7 +381,7 @@ From the **project root** (where the parent POM lives):
 mvn clean install
 ```
 
-This builds `payment-submit`, `payment-process`, and `payment-bootstrap` in the correct order (Maven resolves it from the dependency graph) and produces the runnable jar in `payment-bootstrap/target/`.
+This builds all modules in the correct order (Maven resolves it from the dependency graph), runs the architecture tests, and produces the runnable jar in `payment-bootstrap/target/`. If any architectural rule is violated, the build fails here.
 
 ### Start the application
 
@@ -357,6 +400,55 @@ java -jar payment-bootstrap/target/payment.jar
 The application starts on **http://localhost:8080**.
 
 > **Note on hot reload:** the bootstrap module includes `spring-boot-devtools`. When running from an IDE with *Build Automatically* enabled, saving a source file triggers an automatic restart.
+
+---
+
+## Testing
+
+The project has two independent kinds of automated test, with very different costs.
+
+### Architecture tests — no infrastructure
+
+The `payment-architecture-tests` module (see [Architecture Tests](#architecture-tests-fitness-functions)) only inspects compiled bytecode. It needs no database, broker, or Docker — it runs in a couple of seconds:
+
+```bash
+mvn -pl payment-architecture-tests test
+```
+
+### Integration tests — real infrastructure via Testcontainers
+
+The context-loading test in `payment-bootstrap` boots the entire Spring application with all modules wired together. Rather than pointing it at an in-memory substitute, it starts **real Postgres, Kafka, and Redis in disposable Docker containers** using [Testcontainers](https://testcontainers.com/).
+
+This is a deliberate choice over H2. An in-memory database makes tests pass, then diverges from Postgres exactly where this project is most sensitive: identity generation, SQL dialect, and the keyset-pagination query. The whole point of the test is to catch a mismatch before production — testing against a *different* engine defeats it. The containers use the same image versions as the `docker/` compose files (`postgres:18.4`, `apache/kafka:4.3.1`, `redis:8.8.0`), so the test environment mirrors production.
+
+Spring Boot's `@ServiceConnection` wires each container into the context automatically — the datasource URL and credentials, `spring.kafka.bootstrap-servers`, and the Redis host/port are all derived from the running containers, so there is no manual property plumbing. The containers are declared `static` in a shared `AbstractIntegrationTest` base class, so they start **once** and are reused across every integration test that extends it.
+
+> **Kafka container class:** the base uses `org.testcontainers.kafka.KafkaContainer`, which supports the `apache/kafka` image used by the compose setup. The older `org.testcontainers.containers.KafkaContainer` is deprecated and targets the Confluent `cp-kafka` image — passing it an `apache/kafka` image fails an image-compatibility check at startup, so the newer class is the correct one here.
+
+**Requirement:** a Docker daemon must be available on the machine running the tests (local dev or CI runner). No `docker compose up` is needed — Testcontainers starts and tears the containers down itself.
+
+```bash
+mvn -pl payment-bootstrap test     # starts containers, boots the context, verifies wiring
+```
+
+### Everything together
+
+```bash
+mvn verify
+```
+
+runs both kinds across the whole reactor. Because a violated architecture rule or a failed context load fails the build, wiring `mvn verify` into CI is what keeps the architecture and the wiring from silently eroding over time. The only CI prerequisite is a Docker-capable runner for the Testcontainers step.
+
+---
+
+## Build Notes
+
+A few harmless things you will see in the build output, called out so they don't look like problems:
+
+- **`JAR will be empty - no content was marked for inclusion!`** on `payment-architecture-tests` — expected. That module holds only test code, so its production jar is legitimately empty. It can be silenced with `<skip>true</skip>` on the jar plugin, but there is no harm in leaving it.
+- **`The following options were not recognized by any processor: mapstruct.*`** on every module — the parent POM configures the MapStruct annotation processor, but the project does not actually use MapStruct (all mappings are hand-written). The warning is cosmetic; removing the MapStruct `dependencyManagement` entry and its two `annotationProcessorPaths` entries from the parent POM (keeping only Lombok) makes it disappear.
+- **`sun.misc.Unsafe` / Lombok warnings** — emitted by Lombok's annotation processor on recent JDKs. Cosmetic, resolved by future Lombok releases.
+- **`Mockito self-attaching` / dynamic agent warnings** — emitted by Mockito's inline mock maker under Java 25. Cosmetic; can be silenced by adding Mockito as an explicit `-javaagent`.
 
 ---
 

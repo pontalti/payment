@@ -1,13 +1,14 @@
 package com.payment;
 
 import org.junit.jupiter.api.Test;
-import org.springframework.boot.test.context.SpringBootTest;
 
-@SpringBootTest
-class PaymentApplicationTests {
+/**
+ * Verifies that the full Spring context boots with every module wired together,
+ * backed by real Postgres, Kafka and Redis provided by {@link AbstractIntegrationTest}.
+ */
+class PaymentApplicationTests extends AbstractIntegrationTest {
 
-	@Test
-	void contextLoads() {
-	}
-
+    @Test
+    void contextLoads() {
+    }
 }
