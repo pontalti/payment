@@ -169,7 +169,7 @@ Note the symmetry: **driving adapters call ports; driven adapters implement port
 
 ## Project Structure
 
-Each context module follows the same internal hexagonal layout (`domain` → `application` → `adapter`). At the **root of the project** there is a `docker/` folder containing `docker-compose` files that provision all the required infrastructure — **Redis, Kafka, and PostgreSQL** — so the whole environment can be started for local runs (see [Running the Application](#running-the-application)).
+Each context module follows the same internal hexagonal layout (`domain` → `application` → `adapter`). At the **root of the project** there is a `docker/` folder containing `docker-compose` files that provision all the required infrastructure — **Redis, Kafka, and PostgreSQL** — with a single root `docker-compose.yml` that brings the whole environment up at once (see [Running the Application](#running-the-application)).
 
 ```
 payment/                                        # parent / aggregator POM
@@ -363,15 +363,59 @@ Resilience on the consumer side: `@RetryableTopic` retries transient failures wi
 
 ### Prerequisites — infrastructure via Docker
 
-All required infrastructure is provided as **`docker-compose`** files inside the **`docker/` folder at the root of the project**. It provisions the three backing services the application depends on:
+All required infrastructure is provided as **`docker-compose`** files inside the **`docker/` folder at the root of the project**. Each backing service lives in its own subfolder, and a **single root `docker-compose.yml`** ties them together so the whole environment comes up with one command:
 
-- **PostgreSQL** on `localhost:5432` (database `appdb`)
-- **Kafka broker** on `localhost:9092`
-- **Redis** on `localhost:6379` (with the password configured in `application.yaml`)
+```
+docker/
+├── docker-compose.yml            # root file — brings up everything (Compose project: dev-infra)
+├── postgres/docker-compose.yml   # PostgreSQL + pgAdmin
+├── kafka/docker-compose.yml      # Kafka (KRaft, single node) + Kafka-UI
+└── redis/docker-compose.yml      # Redis + RedisInsight
+```
 
-Start each service with `docker compose up -d` from its folder under `docker/`, then stop them with `docker compose down`.
+The root file redefines nothing — it uses Compose's **`include`** directive to pull in the three per-service files:
 
-> Make sure the ports above are free before starting, and that the credentials in the compose files match the ones in `payment-bootstrap/src/main/resources/application.yaml` (datasource user/password and Redis password).
+```yaml
+name: dev-infra
+
+include:
+  - postgres/docker-compose.yml
+  - kafka/docker-compose.yml
+  - redis/docker-compose.yml
+```
+
+Running everything as **one Compose project** (rather than three isolated stacks) means all services share a single network, resolve each other by service name, and are managed together — up, down, logs, and status in a single command.
+
+**Start everything** from the `docker/` folder:
+
+```bash
+cd docker
+docker compose up -d          # start Postgres, Kafka, Redis (+ their UIs)
+docker compose ps             # status / health of all services
+docker compose logs -f kafka  # follow the logs of a single service
+docker compose down           # stop everything (data volumes kept)
+docker compose down -v        # stop everything and wipe the data volumes
+```
+
+The three services the application connects to:
+
+| Service | Address | Notes |
+|---------|---------|-------|
+| PostgreSQL | `localhost:5432` | database `appdb`, user / password `app` / `app` |
+| Kafka broker | `localhost:9092` | KRaft mode, single broker |
+| Redis | `localhost:6379` | password `app` (`--requirepass`) |
+
+Each stack also ships a **management UI**, useful for inspecting state while developing:
+
+| UI | URL | Login |
+|----|-----|-------|
+| pgAdmin | [http://localhost:5050](http://localhost:5050) | desktop mode — no login prompt |
+| Kafka-UI | [http://localhost:8082](http://localhost:8082) | — |
+| RedisInsight | [http://localhost:5540](http://localhost:5540) | — |
+
+> **Compose version:** the `include` directive requires **Docker Compose v2.20+** (any recent Docker Desktop / Engine). On older versions, either upgrade or combine the files explicitly: `docker compose -f postgres/docker-compose.yml -f kafka/docker-compose.yml -f redis/docker-compose.yml up -d`.
+
+> Make sure the ports above are free before starting, and that the credentials in the compose files match the ones in `payment-bootstrap/src/main/resources/application.yaml` (datasource user/password and Redis password). You can still bring up a single stack on its own when you only need one dependency — e.g. `docker compose -f docker/redis/docker-compose.yml up -d`.
 
 ### Build all modules
 
@@ -568,9 +612,13 @@ The cursor is **opaque** — it is a Base64 token, not a raw sequential id. Clie
 
 The service exposes an interactive **Swagger UI** (via springdoc-openapi) where you can browse and execute every endpoint directly from the browser — no external HTTP client needed.
 
-**Swagger UI:** [http://localhost:8080/swagger-ui.html](http://localhost:8080/swagger-ui.html)
+Swagger UI is the **human-facing entry point into the REST driving adapters** — `PaymentController` (the `submit` side) and `PaymentQueryController` (the `process` side). Every operation listed there is one of those adapters invoking a driving port (`SubmitPaymentUseCase`, `GetPaymentUseCase`), so exercising the API through Swagger *is* exercising the driving edge of the hexagon. It is the quickest way both to **test** the endpoints and to **understand** the REST adapter itself: what it exposes, and how each HTTP operation maps to the use case underneath — without writing a single line of client code.
+
+**Swagger UI:** [http://localhost:8080/swagger-ui/index.html](http://localhost:8080/swagger-ui/index.html)
 
 **OpenAPI spec (raw JSON):** [http://localhost:8080/v3/api-docs](http://localhost:8080/v3/api-docs)
+
+> The shorter `/swagger-ui.html` still works too — springdoc simply redirects it to `/swagger-ui/index.html` above.
 
 ### Suggested test walkthrough
 
