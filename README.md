@@ -360,6 +360,7 @@ Resilience on the consumer side: `@RetryableTopic` retries transient failures wi
 | Observability | OpenTelemetry (`spring-boot-starter-opentelemetry`) → OTLP; Micrometer with OTel semantic conventions |
 | Logs / correlation | Logback → OpenTelemetry appender → Loki, correlated by `trace_id` |
 | Telemetry backend | Grafana LGTM — Loki, Tempo, Prometheus, Grafana (dev only) |
+| Containerization | Docker (multi-stage build) + Docker Compose (infra + app) |
 
 ---
 
@@ -451,6 +452,44 @@ java -jar payment-bootstrap/target/payment.jar
 The application starts on **http://localhost:8080**.
 
 > **Note on hot reload:** the bootstrap module includes `spring-boot-devtools`. When running from an IDE with *Build Automatically* enabled, saving a source file triggers an automatic restart.
+
+### Run everything in Docker (app + infrastructure)
+
+The steps above run the app on your host against containerized infrastructure. Alternatively, the whole stack — **infrastructure and the application** — can run in Docker with a single command, using the root `docker-compose.yml` and the `docker/app.dockerfile` build.
+
+Two compose files, two purposes:
+
+- `docker/docker-compose.yml` — **infrastructure only** (used by the host-based flow above; run from the `docker/` folder).
+- `docker-compose.yml` (project root) — **infrastructure + the app**, in one Compose project. This is the fully containerized path.
+
+**The image build (`docker/app.dockerfile`)** is multi-stage: a Maven stage compiles the multi-module project and produces the runnable `payment-bootstrap` jar (`payment.jar`), and a slim `eclipse-temurin` JRE stage runs it as a non-root user. Two things worth noting:
+
+- It builds only the runnable module and its dependencies (`-pl payment-bootstrap -am`) and **skips tests** (`-DskipTests`) — the integration tests use Testcontainers, which needs a Docker daemon that isn't available during `docker build`.
+- The build context is the **project root** (the Dockerfile copies the parent pom and module sources from there), which is why the root compose sets `build.context: .`.
+
+**The `docker` profile (`application-docker.yaml`)** is what lets the app find the other containers. It lives in `payment-bootstrap/src/main/resources/` (so it is packaged into the jar) and is activated by `SPRING_PROFILES_ACTIVE=docker` (baked into the image). It overrides the `localhost` hosts of the base `application.yaml` with the **Compose service names**:
+
+| Backend | Base (`application.yaml`) | Docker profile (`application-docker.yaml`) |
+|---------|---------------------------|--------------------------------------------|
+| PostgreSQL | `localhost:5432` | `postgres:5432` |
+| Redis | `localhost` | `redis` |
+| Kafka | `localhost:9092` | `kafka:9094` |
+| OTLP (metrics / traces / logs) | `localhost:4318` | `otel-lgtm:4318` |
+
+> **Kafka uses `9094`, not `9092`, inside the network.** The broker advertises two listeners: `EXTERNAL` on `localhost:9092` (for clients on the host) and `INTERNAL` on `kafka:9094` (for clients on the Compose network). Containers — including the app — must use the internal `kafka:9094`.
+
+Because infrastructure and app share a single Compose project (and therefore one network), the app resolves those service names automatically — no extra network wiring is needed.
+
+Run it, from the project root:
+
+```bash
+docker compose up -d --build     # build the app image and start everything
+docker compose ps                # status
+docker compose logs -f app       # follow the application logs
+docker compose down              # stop everything (volumes kept)
+```
+
+The app comes up on the same ports as before — **8080** (HTTP), **8081** (actuator), **8000** (remote debug) — and `depends_on` waits for Postgres, Redis, Kafka and the LGTM stack to report healthy before it starts.
 
 ---
 

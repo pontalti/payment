@@ -1,0 +1,128 @@
+server:
+  port: 8080
+  tomcat:
+    accesslog:
+      enabled: true
+      directory: logs
+      prefix: access_log
+      suffix: .log
+      file-date-format: .yyyy-MM-dd
+      pattern: '%h %l %u %t "%r" %s %b %D'
+spring:
+  application:
+    name: payment
+  cache:
+    type: redis
+
+# PostgreSQL
+  datasource:
+    url: jdbc:postgresql://postgres:5432/appdb
+    username: app
+    password: app
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      maximum-pool-size: 10
+      minimum-idle: 2
+      connection-timeout: 30000
+  jpa:
+    hibernate:
+      ddl-auto: update          # use 'update' only in early dev; prefer Flyway/Liquibase
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+        format_sql: true
+    show-sql: true
+
+# Redis
+  data:
+    redis:
+      host: redis
+      port: 6379
+      password: app
+      repositories:
+        enabled: false
+
+# Kafka
+  kafka:
+    topic:
+      name: my-topic
+    template:
+      observation-enabled: true    # tracing on the producer side (submit)
+    listener:
+      observation-enabled: true    # tracing on the consumer side (process)
+    bootstrap-servers: kafka:9094    # INTERNAL listener — in-network clients use 9094, not 9092
+    consumer:
+      group-id: payment
+      auto-offset-reset: latest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      isolation-level: read-committed
+      enable-auto-commit: true
+      
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      acks: all
+      retries: 5
+      properties:
+        enable:
+          idempotence: true
+        max-in-flight-requests-per-connection: 5
+
+logging:
+  level:
+    root: INFO
+    "[org.apache.catalina]": INFO
+    "[org.apache.coyote]": INFO
+    "[org.apache.tomcat]": INFO
+    "[org.hibernate.SQL]": DEBUG
+    "[org.hibernate.orm.jdbc.bind]": TRACE
+
+cache:
+  ttl: 10m
+  payments:
+    name: payments
+
+# Swagger UI at http://localhost:8080/swagger-ui.html
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html
+  api-docs:
+    path: /v3/api-docs
+
+info:
+  app:
+    name: Payment
+    description: Payment service - Spring Boot Actuator
+    version: 1.0.0
+
+management:
+  server:
+    port: 8081
+  info:
+    env:
+      enabled: true
+  endpoint:
+    health:
+      show-details: always
+  endpoints:
+    web:
+      exposure:
+        include: "*"
+  tracing:
+    sampling:
+      probability: 1.0     # dev: 100%. In production, reduce it (e.g. 0.1)
+  otlp:
+    metrics:
+      export:
+        url: http://otel-lgtm:4318/v1/metrics
+  opentelemetry:
+    tracing:
+      export:
+        otlp:
+          endpoint: http://otel-lgtm:4318/v1/traces
+    logging:
+      export:
+        schedule-delay: 5s
+        otlp:
+          endpoint: http://otel-lgtm:4318/v1/logs

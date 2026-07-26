@@ -1,0 +1,53 @@
+# docker-compose.yml  (project root)
+# Full local stack: the whole dev infrastructure
+# (Postgres + pgAdmin, Kafka + Kafka-UI, Redis + RedisInsight, LGTM observability)
+# PLUS the Payment application itself — all in one Compose project, sharing one network.
+#
+# Requires Docker Compose v2.20+ (recent Docker Desktop / Engine).
+#
+# Usage (from the project root):
+#   docker compose up -d --build   # build the app image and start everything
+#   docker compose ps              # status
+#   docker compose logs -f app     # follow the application logs
+#   docker compose down            # stop everything (volumes kept)
+#   docker compose down -v         # stop everything and wipe the volumes
+#   docker compose down --volumes --remove-orphans --rmi all # remove all dependencies
+
+name: dev-infra
+
+# Infrastructure: each stack lives in its own compose file under docker/.
+# Paths are relative to THIS file (the project root), hence the docker/ prefix.
+# (A Dockerfile can NOT be included here — the app is defined as a service below.)
+include:
+  - docker/postgres/docker-compose.yml
+  - docker/kafka/docker-compose.yml
+  - docker/redis/docker-compose.yml
+  - docker/observability/docker-compose.yml
+
+services:
+  # The Payment application, built from the multi-module Maven project.
+  # It runs with the "docker" Spring profile (application-docker.yaml), so it
+  # reaches the other services by their Compose names — postgres, redis,
+  # kafka:9094 (INTERNAL listener), otel-lgtm — on the shared default network.
+  app:
+    build:
+      context: .                        # project root: the Dockerfile copies the poms/sources from here
+      dockerfile: docker/app.dockerfile
+    container_name: payment-app
+    restart: unless-stopped
+    environment:
+      # Already baked into the image via ENV; repeated here for visibility / easy override.
+      SPRING_PROFILES_ACTIVE: docker
+    ports:
+      - "8080:8080"   # HTTP
+      - "8081:8081"   # actuator / management
+      - "8000:8000"   # remote debug (dev)
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      otel-lgtm:
+        condition: service_healthy
