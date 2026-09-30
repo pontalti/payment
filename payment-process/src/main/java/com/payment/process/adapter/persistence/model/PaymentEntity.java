@@ -2,7 +2,6 @@ package com.payment.process.adapter.persistence.model;
 
 import java.math.BigDecimal;
 import java.time.Instant;
-import java.util.Objects;
 import java.util.UUID;
 
 import org.hibernate.Hibernate;
@@ -68,17 +67,13 @@ public class PaymentEntity {
     	return Hibernate.getClass(this).hashCode();
     }
     
-	@Override
-	public boolean equals(Object obj) {
-		if (this == obj)
-			return true;
-		if (obj == null)
-			return false;
-		if (getClass() != obj.getClass())
-			return false;
-		PaymentEntity other = (PaymentEntity) obj;
-		return uuid != null && Objects.equals(uuid, other.uuid);
-	}
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (o == null || Hibernate.getClass(this) != Hibernate.getClass(o)) return false;
+        PaymentEntity other = (PaymentEntity) o;
+        return uuid != null && uuid.equals(other.getUuid());
+    }
 
 	@Override
 	public String toString() {
